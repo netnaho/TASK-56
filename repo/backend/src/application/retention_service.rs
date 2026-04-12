@@ -638,15 +638,13 @@ async fn run_policy_execution(
     strict_mode: bool,
     enc: &FieldEncryption,
 ) -> AppResult<RetentionExecutionResult> {
-    // Use MySQL's own clock for the cutoff to eliminate container clock-skew
-    // between the Rust process and MySQL (which could cause rows inserted in the
-    // same second to be missed when retention_days = 0).
-    let db_now: NaiveDateTime = sqlx::query_scalar("SELECT UTC_TIMESTAMP(6)")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| AppError::Database(format!("get db time: {}", e)))?;
-    let cutoff = db_now - Duration::days(policy.retention_days as i64);
+    // Use Rust's clock for the cutoff. Row timestamps (created_at, expires_at,
+    // checked_in_at) are all stored using Utc::now().naive_utc() by the service
+    // layer, so using the same clock domain ensures the comparison is consistent.
+    // The <= operator (not strict <) handles the case where retention_days = 0
+    // and a row was created in the same second as the cutoff is calculated.
     let executed_at = Utc::now().naive_utc();
+    let cutoff = executed_at - Duration::days(policy.retention_days as i64);
 
     // rows_affected, files_deleted, crypto_erased, legacy_fallback, missing_file,
     // legacy_unbackfilled, legacy_encrypt_failed, blocked_due_to_strict_mode

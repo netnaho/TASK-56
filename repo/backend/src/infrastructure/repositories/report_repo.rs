@@ -248,13 +248,18 @@ pub async fn find_run_by_id(pool: &MySqlPool, id: Uuid) -> AppResult<ReportRunRo
 }
 
 pub async fn insert_run(pool: &MySqlPool, row: &ReportRunRow) -> AppResult<()> {
+    // created_at is intentionally omitted — MySQL's DEFAULT CURRENT_TIMESTAMP
+    // stores the exact second floor (no rounding). If we bind Rust's
+    // NaiveDateTime, MySQL DATETIME rounds sub-seconds (e.g. 14:37:40.875 →
+    // 14:37:41), which can cause the retention cutoff (Rust's Utc::now(), also
+    // sub-second) to fall *before* the stored value and miss the row.
     sqlx::query(
         r#"
         INSERT INTO report_runs
             (id, report_id, triggered_by, triggered_source, format, status,
              artifact_path, artifact_size_bytes, artifact_dek, error_message,
-             started_at, completed_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&row.id)
@@ -269,7 +274,6 @@ pub async fn insert_run(pool: &MySqlPool, row: &ReportRunRow) -> AppResult<()> {
     .bind(&row.error_message)
     .bind(row.started_at)
     .bind(row.completed_at)
-    .bind(row.created_at)
     .execute(pool)
     .await
     .map_err(|e| AppError::Database(format!("insert_run: {}", e)))?;

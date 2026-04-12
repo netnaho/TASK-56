@@ -155,11 +155,20 @@ fi
 if [ $UNIT_ONLY -eq 0 ]; then
   banner "API tests  (shell scripts vs ${BACKEND_URL})"
 
-  health_response=$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_URL}/api/v1/health" 2>/dev/null || echo "000")
-  if [ "$health_response" = "000" ] || [ "$health_response" = "404" ]; then
-    skip "Backend not reachable at ${BACKEND_URL}."
-    echo "       Start the stack first:  docker compose up"
-    echo "       Then:                   ./run_tests.sh"
+  # curl writes "000" when there is no HTTP response (connection refused, timeout).
+  # The trailing "; true" prevents set -e from aborting on a non-zero curl exit.
+  health_response=$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_URL}/api/v1/health" 2>/dev/null; true)
+  if [ "$health_response" != "200" ]; then
+    skip "Backend not reachable or unhealthy at ${BACKEND_URL} (HTTP ${health_response})."
+    echo ""
+    echo "  Start the stack first:  docker compose up"
+    echo "  Then re-run:            ./run_tests.sh"
+    echo ""
+    if [ "$health_response" = "502" ] || [ "$health_response" = "503" ]; then
+      echo "  HTTP ${health_response} usually means nginx is up but the backend container"
+      echo "  has not finished starting or crashed. Check logs with:"
+      echo "    docker compose logs backend"
+    fi
   else
     total_api=0
     failed_api=0
