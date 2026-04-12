@@ -1,0 +1,45 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Dioxus
+frontend/dist/
+frontend/target/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# MySQL data (managed by Docker volume)
+mysql_data/
+
+# Attachment storage (managed by Docker volume)
+attachments/
+
+# Test artifacts
+*.log
+coverage/
+test-results/
+
+# Build artifacts
+*.tar
+*.gz
+.tmp/
+.claude/
+CLAUDE.md

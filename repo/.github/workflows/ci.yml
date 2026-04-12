@@ -1,0 +1,204 @@
+# Scholarly — Main CI
+#
+# Runs on every push to `main` and on every pull request.
+#
+# Job map
+# ───────
+# lint                  cargo fmt --check + clippy (fast reject, no DB)
+# backend-unit          cargo test --lib            (fast, no DB)
+# backend-db-integration  MySQL service + ./run_tests.sh --strict-integration
+#                         This is the PRIMARY enforcement gate.  The run
+#                         exits non-zero if SCHOLARLY_TEST_DB_URL is absent
+#                         OR if any DB integration test fails.
+# frontend              cargo test in frontend/     (no DB)
+#
+# Silent-skip prevention
+# ──────────────────────
+# The five tests in backend/tests/api_routes_test.rs skip gracefully when
+# SCHOLARLY_TEST_DB_URL is absent (they return immediately, so `cargo test`
+# still reports them as "passed").  This creates a false-green risk in CI.
+#
+# Two layers prevent silent skips here:
+#   1. The job-level `env:` block hard-codes SCHOLARLY_TEST_DB_URL so the
+#      variable is always present for any step in the job.
+#   2. The "Guard" step fails immediately before the test runner if the
+#      variable is unexpectedly empty (e.g. someone deletes the env block).
+#   3. `./run_tests.sh --strict-integration` itself exits 1 when the
+#      variable is absent, providing a third independent check.
+#
+# The result: DB integration tests cannot be silently skipped in CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Lint ───────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+        working-directory: backend
+
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+        working-directory: backend
+
+  # ── Backend unit tests ────────────────────────────────────────────────────
+  backend-unit:
+    name: Backend unit tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: cargo test --lib
+        run: cargo test --lib
+        working-directory: backend
+
+  # ── DB-backed integration tests (strict enforcement) ──────────────────────
+  #
+  # This job owns the security contract:
+  #   "DB-backed authz/scope integration tests MUST run in CI and MUST pass."
+  #
+  # It provisions a fresh MySQL 8.0 instance, applies all migrations and seeds
+  # (replicating what entrypoint.sh does in the Docker stack), then delegates
+  # to ./run_tests.sh --strict-integration which:
+  #   - Runs cargo test --lib
+  #   - Runs cargo test --test '*' (all integration tests including the DB ones)
+  #   - Re-runs cargo test --test api_routes_test explicitly for visibility
+  #   - Exits 1 if SCHOLARLY_TEST_DB_URL is absent (strict mode)
+  #   - Runs frontend cargo tests
+  #   - Skips the shell API suite (no live backend in this job — acceptable)
+  backend-db-integration:
+    name: DB integration tests (strict)
+    runs-on: ubuntu-22.04
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: scholarly_root_pass
+          MYSQL_DATABASE: scholarly
+          MYSQL_USER: scholarly_app
+          MYSQL_PASSWORD: scholarly_app_pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -u root -pscholarly_root_pass"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+    # SCHOLARLY_TEST_DB_URL is deliberately set at the job level so every
+    # step in the job inherits it.  The Guard step below will catch any case
+    # where this block is removed or the value becomes empty.
+    env:
+      SCHOLARLY_TEST_DB_URL: "mysql://scholarly_app:scholarly_app_pass@127.0.0.1:3306/scholarly"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MySQL client
+        run: sudo apt-get install -y --no-install-recommends mysql-client
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cache both workspaces: run_tests.sh compiles backend AND frontend.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend
+            frontend
+
+      # ── Apply schema ──────────────────────────────────────────────────────
+      # Replicate what entrypoint.sh does in the Docker stack.
+      # Migrations use CREATE TABLE IF NOT EXISTS / ALTER TABLE so they are
+      # idempotent; a non-zero exit from mysql is a genuine error in CI
+      # (fresh DB, nothing is pre-applied) and is surfaced immediately.
+      - name: Apply migrations
+        run: |
+          echo "Applying migrations to scholarly database..."
+          for f in $(ls backend/migrations/*.sql | sort); do
+            echo "  → $(basename "$f")"
+            mysql -h 127.0.0.1 -u scholarly_app -pscholarly_app_pass scholarly < "$f"
+          done
+          echo "Migrations complete."
+
+      # Seeds use INSERT IGNORE so they are idempotent.
+      # They insert seed users with '__BOOTSTRAP__' password sentinels.
+      # build_rocket() (called by the test harness) runs bootstrap on startup
+      # which replaces them with real Argon2id hashes — no separate step needed.
+      - name: Apply seeds
+        run: |
+          echo "Applying seeds to scholarly database..."
+          for f in $(ls backend/seeds/*.sql | sort); do
+            echo "  → $(basename "$f")"
+            mysql -h 127.0.0.1 -u scholarly_app -pscholarly_app_pass scholarly < "$f"
+          done
+          echo "Seeds complete."
+
+      # ── Guard — fail explicitly before the test runner ────────────────────
+      # If someone removes the job-level env block, the tests would silently
+      # skip and pass.  This step catches that before it happens.
+      - name: Guard — verify SCHOLARLY_TEST_DB_URL is set
+        run: |
+          if [ -z "${SCHOLARLY_TEST_DB_URL:-}" ]; then
+            echo "::error::SCHOLARLY_TEST_DB_URL is not set."
+            echo "::error::This is a CI misconfiguration — the job-level env block may have been removed."
+            echo "::error::Without this variable the DB integration tests silently skip and produce false greens."
+            exit 1
+          fi
+          echo "SCHOLARLY_TEST_DB_URL is configured (value not printed to avoid leaking credentials)."
+
+      # ── Primary enforcement gate ──────────────────────────────────────────
+      # --strict-integration exits 1 if SCHOLARLY_TEST_DB_URL is absent AND
+      # causes the DB authz tests to run against the live MySQL service above.
+      - name: Run ./run_tests.sh --strict-integration
+        run: ./run_tests.sh --strict-integration
+
+  # ── Frontend tests ────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend unit tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend
+
+      - name: cargo test
+        run: cargo test
+        working-directory: frontend

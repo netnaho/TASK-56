@@ -1,0 +1,14 @@
+[application]
+name = "scholarly-frontend"
+
+[web.app]
+title = "Scholarly"
+
+[web.watcher]
+watch_path = ["src"]
+
+[web.resource]
+style = ["assets/main.css"]
+
+[web.resource.dev]
+style = []

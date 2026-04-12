@@ -1,0 +1,165 @@
+# Scholarly — DB Security Integration Gate
+#
+# Purpose
+# ───────
+# Provides a dedicated, clearly-named CI signal for the five DB-backed
+# security integration tests in backend/tests/api_routes_test.rs.
+#
+# These tests cover authorization and scope-enforcement paths that unit tests
+# cannot exercise end-to-end:
+#   1. db_unauthenticated_request_is_rejected_with_401
+#   2. db_non_admin_is_forbidden_on_admin_only_endpoint
+#   3. db_report_schedule_listing_enforces_department_scope
+#   4. db_audit_export_denied_to_non_exporting_roles
+#   5. db_admin_audit_export_returns_200_with_valid_csv
+#   ... (additional tests added in phases 5 and 6)
+#
+# Relationship to ci.yml
+# ──────────────────────
+# ci.yml enforces the same tests via `./run_tests.sh --strict-integration`
+# (broader, includes unit + frontend).  This workflow runs ONLY the DB
+# security tests so that:
+#   a) The result label "DB Security Gate" appears as its own check on PRs.
+#   b) Failures are immediately attributable to the security test file.
+#   c) The job can be required separately in branch protection rules.
+#
+# Silent-skip prevention (defence in depth)
+# ─────────────────────────────────────────
+# Layer 1 — job env: SCHOLARLY_TEST_DB_URL is always set for this job.
+# Layer 2 — Guard step: explicit pre-flight check before cargo test runs.
+# Layer 3 — Output scan: grep for "[SKIP]" in test output; exit 1 if found.
+#            When SCHOLARLY_TEST_DB_URL is set the tests run for real and
+#            never emit "[SKIP]".  Detecting it here catches any regression
+#            in the skip-gate logic inside the test file itself.
+# Layer 4 — pipefail: cargo test exit code propagates through the tee pipe.
+
+name: DB Security Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  api-routes-security:
+    name: api_routes_test — DB security integration
+    runs-on: ubuntu-22.04
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: scholarly_root_pass
+          MYSQL_DATABASE: scholarly
+          MYSQL_USER: scholarly_app
+          MYSQL_PASSWORD: scholarly_app_pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -u root -pscholarly_root_pass"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+    env:
+      # Set at job level so every step inherits it.  The Guard step detects
+      # if this block is removed or the value is inadvertently emptied.
+      SCHOLARLY_TEST_DB_URL: "mysql://scholarly_app:scholarly_app_pass@127.0.0.1:3306/scholarly"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MySQL client
+        run: sudo apt-get install -y --no-install-recommends mysql-client
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      # ── Schema setup ──────────────────────────────────────────────────────
+      - name: Apply migrations
+        run: |
+          echo "Applying migrations..."
+          for f in $(ls backend/migrations/*.sql | sort); do
+            echo "  → $(basename "$f")"
+            mysql -h 127.0.0.1 -u scholarly_app -pscholarly_app_pass scholarly < "$f"
+          done
+
+      - name: Apply seeds
+        run: |
+          echo "Applying seeds..."
+          for f in $(ls backend/seeds/*.sql | sort); do
+            echo "  → $(basename "$f")"
+            mysql -h 127.0.0.1 -u scholarly_app -pscholarly_app_pass scholarly < "$f"
+          done
+
+      # ── Guard — layer 2 ───────────────────────────────────────────────────
+      - name: Guard — SCHOLARLY_TEST_DB_URL must be set
+        run: |
+          if [ -z "${SCHOLARLY_TEST_DB_URL:-}" ]; then
+            echo "::error title=Missing env var::SCHOLARLY_TEST_DB_URL is not set."
+            echo "::error::DB integration tests will silently skip if this variable is absent."
+            echo "::error::Check that the job-level 'env:' block is present in db-security.yml."
+            exit 1
+          fi
+          echo "SCHOLARLY_TEST_DB_URL is present."
+
+      # ── Run the security tests ────────────────────────────────────────────
+      # --test-threads=1 serialises tests to avoid the (harmless, noisy)
+      # env-var overwrite race from concurrent build_client() calls.
+      # tee streams output to the console AND saves it for post-run checks.
+      # set -o pipefail ensures cargo test's exit code propagates through tee.
+      - name: cargo test --test api_routes_test
+        shell: bash
+        working-directory: backend
+        run: |
+          set -o pipefail
+          SCHOLARLY_TEST_DB_URL="${SCHOLARLY_TEST_DB_URL}" \
+            cargo test --test api_routes_test -- --test-threads=1 \
+            2>&1 | tee /tmp/db_security_test_output.txt
+
+      # ── Layer 3 — silent-skip detector ───────────────────────────────────
+      # If any test emits "[SKIP]" it means SCHOLARLY_TEST_DB_URL was set
+      # but the DB was unreachable/uninitialised, causing the skip gate to
+      # fire.  This should never happen when the MySQL service is healthy and
+      # migrations have been applied, but an explicit check eliminates doubt.
+      - name: Verify no tests were silently skipped
+        if: always()
+        run: |
+          if [ ! -f /tmp/db_security_test_output.txt ]; then
+            echo "::warning::Test output file not found — cannot verify skip status."
+            exit 0
+          fi
+
+          if grep -qF "[SKIP]" /tmp/db_security_test_output.txt; then
+            echo "::error title=Silent skip detected::One or more DB security tests emitted [SKIP]."
+            echo "::error::This means SCHOLARLY_TEST_DB_URL was set but the database was unreachable"
+            echo "::error::or not fully initialised.  Check the MySQL service health and migration steps."
+            echo ""
+            echo "Test output:"
+            cat /tmp/db_security_test_output.txt
+            exit 1
+          fi
+
+          echo "No silent skips detected. All DB security tests ran against the live database."
+
+      # ── Summarise ─────────────────────────────────────────────────────────
+      - name: Print test summary
+        if: always()
+        run: |
+          if [ -f /tmp/db_security_test_output.txt ]; then
+            echo "=== DB Security Test Output ==="
+            cat /tmp/db_security_test_output.txt
+          fi

@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+backend/target/
+frontend/target/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed in containers)
+docs/
+
+# Test folders (not needed in production containers)
+unit_tests/
+API_tests/
+
+# Docker files
+docker-compose.yml
+docker-compose.override.yml
+.dockerignore
+
+# Environment
+.env
+.env.*

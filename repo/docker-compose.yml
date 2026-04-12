@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  # ──────────────────────────────────────────
+  # MySQL 8.0 — primary data store
+  # ──────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: scholarly-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: scholarly_root_pass
+      MYSQL_DATABASE: scholarly
+      MYSQL_USER: scholarly_app
+      MYSQL_PASSWORD: scholarly_app_pass
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pscholarly_root_pass"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - scholarly-net
+
+  # ──────────────────────────────────────────
+  # Backend — Rocket API server (Rust)
+  # ──────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: scholarly-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ROCKET_ADDRESS: "0.0.0.0"
+      ROCKET_PORT: 8000
+      DATABASE_URL: "mysql://scholarly_app:scholarly_app_pass@mysql:3306/scholarly"
+      ATTACHMENT_STORAGE_PATH: "/data/attachments"
+      # Phase 6: report artifact storage (defaults to /data/attachments/reports)
+      REPORTS_STORAGE_PATH: "/data/reports"
+      RUST_LOG: "info"
+      JWT_SECRET: "CHANGE_ME_IN_PRODUCTION"
+      JWT_EXPIRATION_HOURS: "8"
+      MAX_FAILED_LOGINS: "5"
+      LOCKOUT_DURATION_MINUTES: "15"
+      # Phase 6: AES-256-GCM field encryption key (base64url, no padding, 32 bytes).
+      # CHANGE THIS IN PRODUCTION: openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+      FIELD_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      # Fix cross-device rename: keep Rocket TempFile on the same volume as the scratch dir.
+      ROCKET_TEMP_DIR: "/data/attachments/_tmp"
+    volumes:
+      - attachment_storage:/data/attachments
+      - report_storage:/data/reports
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - scholarly-net
+
+  # ──────────────────────────────────────────
+  # Frontend — Dioxus web app (served via static files)
+  # ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: scholarly-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - scholarly-net
+
+volumes:
+  mysql_data:
+    driver: local
+  attachment_storage:
+    driver: local
+  report_storage:
+    driver: local
+
+networks:
+  scholarly-net:
+    driver: bridge
