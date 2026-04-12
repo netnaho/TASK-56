@@ -8,7 +8,7 @@
 #   ./run_tests.sh --unit-only              # only run cargo unit/integration tests
 #
 # DB integration tests (backend/tests/api_routes_test.rs):
-#   SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3306/scholarly \
+#   SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly \
 #     ./run_tests.sh
 #       — Runs the 5 DB-backed authz/scope tests against a live MySQL instance.
 #         The compose stack must be up. Tests run with --test-threads=1.
@@ -106,7 +106,7 @@ if [ $API_ONLY -eq 0 ]; then
     echo "  strict-integration mode requires a live MySQL connection."
     echo "  Set SCHOLARLY_TEST_DB_URL and retry, for example:"
     echo ""
-    echo "    SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3306/scholarly \\"
+    echo "    SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly \\"
     echo "      ./run_tests.sh --strict-integration"
     echo ""
   else
@@ -126,7 +126,7 @@ if [ $API_ONLY -eq 0 ]; then
     echo "  │                                                                  │"
     echo "  │  To run them locally (requires docker compose up first):         │"
     echo "  │    SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass│"
-    echo "  │      @localhost:3306/scholarly ./run_tests.sh                    │"
+    echo "  │      @localhost:3307/scholarly ./run_tests.sh                    │"
     echo "  │                                                                  │"
     echo "  │  To enforce in CI (fails if env var is absent):                  │"
     echo "  │    SCHOLARLY_TEST_DB_URL=mysql://... ./run_tests.sh \\           │"
