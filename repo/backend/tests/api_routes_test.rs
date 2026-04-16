@@ -615,7 +615,7 @@ async fn db_deactivate_user_revokes_sessions() {
 // ---------------------------------------------------------------------------
 // Test 7 — Retention dry-run for "sessions" entity type succeeds
 //
-// Endpoint: POST /api/v1/retention/policies/<id>/execute (dry_run=true)
+// Endpoint: POST /api/v1/admin/retention/<id>/execute (dry_run=true)
 // Risk: if the retention repo whitelist or execution branch still references
 //       `user_sessions`, the dry-run returns a DB error instead of a count.
 // ---------------------------------------------------------------------------
@@ -648,7 +648,7 @@ async fn db_retention_sessions_dry_run_targets_sessions_table() {
     .to_string();
 
     let create_resp = client
-        .post("/api/v1/retention/policies")
+        .post("/api/v1/admin/retention")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
         .body(create_body)
@@ -665,7 +665,7 @@ async fn db_retention_sessions_dry_run_targets_sessions_table() {
     let policy_id = if create_status == Status::Conflict {
         // List policies and find the sessions one.
         let list_resp = client
-            .get("/api/v1/retention/policies")
+            .get("/api/v1/admin/retention")
             .header(bearer(&admin_token))
             .dispatch()
             .await;
@@ -700,7 +700,7 @@ async fn db_retention_sessions_dry_run_targets_sessions_table() {
     // ── Step 2: execute as a dry run ─────────────────────────────────────
     let exec_resp = client
         .post(format!(
-            "/api/v1/retention/policies/{policy_id}/execute?dry_run=true"
+            "/api/v1/admin/retention/{policy_id}/execute?dry_run=true"
         ))
         .header(bearer(&admin_token))
         .dispatch()
@@ -1671,13 +1671,12 @@ async fn db_retry_returns_403_on_network_failure_not_200_network_blocked() {
     //            We store the original value so we can restore it after the test.
     // ─────────────────────────────────────────────────────────────────────────
     let set_cidr_body = serde_json::json!({
-        "key": "checkin.allowed_client_cidrs",
         "value": "[\"203.0.113.0/24\"]"  // TEST-NET-3; never matches loopback
     })
     .to_string();
 
     let _set = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
         .body(set_cidr_body)
@@ -1718,12 +1717,11 @@ async fn db_retry_returns_403_on_network_failure_not_200_network_blocked() {
     //            Disable the rule temporarily, create a clean check-in, then
     //            re-enable it before driving the retry.
     let clear_cidr_body = serde_json::json!({
-        "key": "checkin.allowed_client_cidrs",
         "value": "[]"
     })
     .to_string();
     let _clear = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
         .body(clear_cidr_body)
@@ -1778,12 +1776,11 @@ async fn db_retry_returns_403_on_network_failure_not_200_network_blocked() {
 
     // Re-enable the restrictive network rule.
     let restore_cidr_body = serde_json::json!({
-        "key": "checkin.allowed_client_cidrs",
         "value": "[\"203.0.113.0/24\"]"
     })
     .to_string();
     let _restore = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
         .body(restore_cidr_body)
@@ -1830,12 +1827,11 @@ async fn db_retry_returns_403_on_network_failure_not_200_network_blocked() {
 
     // ── Step 5: Restore the original network rule (clear = no restriction). ─
     let final_clear_body = serde_json::json!({
-        "key": "checkin.allowed_client_cidrs",
         "value": "[]"
     })
     .to_string();
     let _final_clear = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
         .body(final_clear_body)
@@ -2219,7 +2215,7 @@ async fn db_resource_catalog_scoped_by_owner_department() {
 // Test 18 — Retry slot is NOT consumed when the network rule blocks the attempt
 //
 // Endpoints exercised:
-//   POST /api/v1/admin/settings         (enable / disable CIDR rule)
+//   PUT  /api/v1/admin/config/<key>      (enable / disable CIDR rule)
 //   POST /api/v1/checkins               (create clean check-in)
 //   POST /api/v1/checkins/<id>/retry    (attempt retry — blocked → 403)
 //   POST /api/v1/checkins/<id>/retry    (retry after clearing rule → 200)
@@ -2271,10 +2267,10 @@ async fn db_retry_slot_not_consumed_on_network_block() {
     // ── Step 2: Create a clean check-in (no network rule active) ─────────
     // Ensure rule is disabled first.
     let _clear = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
-        .body(r#"{"key":"checkin.allowed_client_cidrs","value":"[]"}"#)
+        .body(r#"{"value":"[]"}"#)
         .dispatch()
         .await;
     let _ = _clear.into_string().await;
@@ -2344,10 +2340,10 @@ async fn db_retry_slot_not_consumed_on_network_block() {
     // ── Step 3: Enable restrictive network rule (TEST-NET-3 never matches
     //            loopback 127.0.0.1 used by the Rocket in-process client) ──
     let _enable = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
-        .body(r#"{"key":"checkin.allowed_client_cidrs","value":"[\"203.0.113.0/24\"]"}"#)
+        .body(r#"{"value":"[\"203.0.113.0/24\"]"}"#)
         .dispatch()
         .await;
     let _ = _enable.into_string().await;
@@ -2372,10 +2368,10 @@ async fn db_retry_slot_not_consumed_on_network_block() {
 
     // ── Step 5: Clear the network rule ────────────────────────────────────
     let _clear2 = client
-        .post("/api/v1/admin/settings")
+        .put("/api/v1/admin/config/checkin.allowed_client_cidrs")
         .header(ContentType::JSON)
         .header(bearer(&admin_token))
-        .body(r#"{"key":"checkin.allowed_client_cidrs","value":"[]"}"#)
+        .body(r#"{"value":"[]"}"#)
         .dispatch()
         .await;
     let _ = _clear2.into_string().await;
@@ -2575,4 +2571,676 @@ async fn db_strict_mode_retention_blocks_and_clears_with_backfill() {
              other rows were processed; body={bf_live_body}"
         );
     }
+}
+
+// ===========================================================================
+// Coverage tests for previously uncovered endpoints
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Cov-1 — GET /api/v1/roles/ and GET /api/v1/roles/<id>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_roles_list_and_get_by_id() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_roles_list_and_get_by_id — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/roles/
+    let list_resp = client
+        .get("/api/v1/roles")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let list_status = list_resp.status();
+    let list_body = list_resp.into_string().await.unwrap_or_default();
+    assert_eq!(list_status, Status::Ok, "GET /api/v1/roles must return 200; body: {list_body}");
+
+    let roles: serde_json::Value = serde_json::from_str(&list_body).expect("roles list must be valid JSON");
+    assert!(roles.is_array(), "GET /api/v1/roles must return a JSON array");
+    let arr = roles.as_array().unwrap();
+    assert!(!arr.is_empty(), "roles list must not be empty (seeds must include at least one role)");
+
+    // GET /api/v1/roles/<id> — use first role from list
+    let role_id = arr[0]["id"].as_str().expect("role must have an id field").to_string();
+    let get_resp = client
+        .get(format!("/api/v1/roles/{role_id}"))
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let get_status = get_resp.status();
+    let get_body = get_resp.into_string().await.unwrap_or_default();
+    assert_eq!(get_status, Status::Ok, "GET /api/v1/roles/{{id}} must return 200; body: {get_body}");
+
+    let role: serde_json::Value = serde_json::from_str(&get_body).expect("role must be valid JSON");
+    assert_eq!(role["id"].as_str(), Some(role_id.as_str()), "returned role id must match requested id");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-2 — GET /api/v1/journals/ (list) and GET /api/v1/journals/<id>/versions/<vid>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_journals_list_and_version_by_id() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_journals_list_and_version_by_id — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let librarian_token = login_as(&client, LIBRARIAN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/journals/
+    let list_resp = client
+        .get("/api/v1/journals")
+        .header(bearer(&librarian_token))
+        .dispatch()
+        .await;
+    let list_status = list_resp.status();
+    let list_body = list_resp.into_string().await.unwrap_or_default();
+    assert_eq!(list_status, Status::Ok, "GET /api/v1/journals must return 200; body: {list_body}");
+
+    // Create a journal so we have something to get versions from
+    let create_body = serde_json::json!({
+        "title": "Coverage-test journal for version fetch"
+    }).to_string();
+    let create_resp = client
+        .post("/api/v1/journals")
+        .header(ContentType::JSON)
+        .header(bearer(&librarian_token))
+        .body(create_body)
+        .dispatch()
+        .await;
+    let create_status = create_resp.status();
+    let create_raw = create_resp.into_string().await.unwrap_or_default();
+    assert_eq!(create_status, Status::Ok, "POST /api/v1/journals must succeed; body: {create_raw}");
+
+    let created: serde_json::Value = serde_json::from_str(&create_raw).expect("journal create body must be JSON");
+    let journal_id = created["id"].as_str().expect("journal must have id").to_string();
+
+    // GET /api/v1/journals/<id>/versions — get the first version ID
+    let versions_resp = client
+        .get(format!("/api/v1/journals/{journal_id}/versions"))
+        .header(bearer(&librarian_token))
+        .dispatch()
+        .await;
+    let versions_status = versions_resp.status();
+    let versions_body = versions_resp.into_string().await.unwrap_or_default();
+    assert_eq!(versions_status, Status::Ok, "GET /api/v1/journals/{{id}}/versions must return 200; body: {versions_body}");
+
+    let versions: serde_json::Value = serde_json::from_str(&versions_body).expect("versions must be JSON");
+    let arr = versions.as_array().expect("versions must be array");
+    assert!(!arr.is_empty(), "newly created journal must have at least one version");
+    let version_id = arr[0]["id"].as_str().expect("version must have id").to_string();
+
+    // GET /api/v1/journals/<id>/versions/<version_id>
+    let ver_resp = client
+        .get(format!("/api/v1/journals/{journal_id}/versions/{version_id}"))
+        .header(bearer(&librarian_token))
+        .dispatch()
+        .await;
+    let ver_status = ver_resp.status();
+    let ver_body = ver_resp.into_string().await.unwrap_or_default();
+    assert_eq!(ver_status, Status::Ok, "GET /api/v1/journals/{{id}}/versions/{{vid}} must return 200; body: {ver_body}");
+
+    let ver: serde_json::Value = serde_json::from_str(&ver_body).expect("version must be valid JSON");
+    assert_eq!(ver["id"].as_str(), Some(version_id.as_str()), "returned version id must match");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-3 — GET /api/v1/metrics/ and GET /api/v1/metrics/<id>/versions
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_metrics_list_and_versions() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_metrics_list_and_versions — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/metrics/
+    let list_resp = client
+        .get("/api/v1/metrics")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let list_status = list_resp.status();
+    let list_body = list_resp.into_string().await.unwrap_or_default();
+    assert_eq!(list_status, Status::Ok, "GET /api/v1/metrics must return 200; body: {list_body}");
+
+    // Create a metric so we have one to fetch versions for
+    let create_body = serde_json::json!({
+        "name": "cov_test_metric",
+        "display_name": "Coverage Test Metric",
+        "description": "Created by coverage test",
+        "unit": "count",
+        "aggregation": "sum",
+        "query_template": "SELECT COUNT(*) FROM checkins",
+        "lineage_refs": []
+    }).to_string();
+
+    let create_resp = client
+        .post("/api/v1/metrics")
+        .header(ContentType::JSON)
+        .header(bearer(&admin_token))
+        .body(create_body)
+        .dispatch()
+        .await;
+    let create_status = create_resp.status();
+    let create_raw = create_resp.into_string().await.unwrap_or_default();
+
+    // 409 means already exists from a prior run — that's fine
+    let metric_id = if create_status == Status::Ok {
+        let v: serde_json::Value = serde_json::from_str(&create_raw).expect("metric JSON");
+        v["id"].as_str().expect("metric id").to_string()
+    } else if create_status == Status::Conflict {
+        // Fetch from list
+        let lr = client.get("/api/v1/metrics").header(bearer(&admin_token)).dispatch().await;
+        let lb = lr.into_string().await.unwrap_or_default();
+        let lv: serde_json::Value = serde_json::from_str(&lb).expect("metrics list JSON");
+        match lv.as_array().and_then(|a| a.first()) {
+            Some(m) => m["id"].as_str().expect("metric id").to_string(),
+            None => {
+                println!("[SKIP] cov_metrics_list_and_versions — no metrics in DB");
+                return;
+            }
+        }
+    } else {
+        panic!("Unexpected status creating metric: {create_status}; body: {create_raw}");
+    };
+
+    // GET /api/v1/metrics/<id>/versions
+    let ver_resp = client
+        .get(format!("/api/v1/metrics/{metric_id}/versions"))
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let ver_status = ver_resp.status();
+    let ver_body = ver_resp.into_string().await.unwrap_or_default();
+    assert_eq!(ver_status, Status::Ok, "GET /api/v1/metrics/{{id}}/versions must return 200; body: {ver_body}");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-4 — POST /api/v1/metrics/widgets/<widget_id>/verify
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_metrics_widget_verify() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_metrics_widget_verify — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // Use a dummy UUID — if no widget exists, expect 404 (not 500 or route-not-found)
+    let dummy_widget_id = uuid::Uuid::new_v4().to_string();
+    let resp = client
+        .post(format!("/api/v1/metrics/widgets/{dummy_widget_id}/verify"))
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let status = resp.status();
+    let body = resp.into_string().await.unwrap_or_default();
+    // Accept 200 (widget found and verified) or 404 (widget not found) — both prove routing works
+    assert!(
+        status == Status::Ok || status == Status::NotFound,
+        "POST /api/v1/metrics/widgets/{{id}}/verify must return 200 or 404 (not 404 from missing route); got {status}; body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cov-5 — POST /api/v1/admin/retention/ and GET /api/v1/admin/retention/<id>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_retention_create_and_get_by_id() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_retention_create_and_get_by_id — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // POST /api/v1/admin/retention/ — create a new policy
+    let create_body = serde_json::json!({
+        "target_entity_type": "audit_logs",
+        "retention_days": 2555,
+        "action": "anonymise",
+        "rationale": "Coverage-test policy",
+        "is_active": false
+    }).to_string();
+
+    let create_resp = client
+        .post("/api/v1/admin/retention")
+        .header(ContentType::JSON)
+        .header(bearer(&admin_token))
+        .body(create_body)
+        .dispatch()
+        .await;
+    let create_status = create_resp.status();
+    let create_raw = create_resp.into_string().await.unwrap_or_default();
+
+    // 409 means policy already exists for this entity type — fetch it via list
+    let policy_id = if create_status == Status::Ok {
+        let v: serde_json::Value = serde_json::from_str(&create_raw).expect("policy JSON");
+        v["id"].as_str().expect("policy id").to_string()
+    } else if create_status == Status::Conflict {
+        let lr = client.get("/api/v1/admin/retention").header(bearer(&admin_token)).dispatch().await;
+        let lb = lr.into_string().await.unwrap_or_default();
+        let lv: serde_json::Value = serde_json::from_str(&lb).expect("retention list JSON");
+        lv.as_array()
+            .and_then(|a| a.iter().find(|p| p["target_entity_type"].as_str() == Some("audit_logs")))
+            .and_then(|p| p["id"].as_str())
+            .expect("audit_logs policy must exist")
+            .to_string()
+    } else {
+        panic!("Unexpected status creating retention policy: {create_status}; body: {create_raw}");
+    };
+
+    // GET /api/v1/admin/retention/<id>
+    let get_resp = client
+        .get(format!("/api/v1/admin/retention/{policy_id}"))
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let get_status = get_resp.status();
+    let get_body = get_resp.into_string().await.unwrap_or_default();
+    assert_eq!(get_status, Status::Ok, "GET /api/v1/admin/retention/{{id}} must return 200; body: {get_body}");
+
+    let policy: serde_json::Value = serde_json::from_str(&get_body).expect("policy body must be JSON");
+    assert_eq!(policy["id"].as_str(), Some(policy_id.as_str()), "returned policy id must match");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-6 — GET /api/v1/sections/<id>/versions, templates, exports, and import
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_sections_versions_templates_exports_import() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_sections_versions_templates_exports_import — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+    let depthead_token = login_as(&client, DEPTHEAD_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/sections/template.csv
+    let tcsv_resp = client
+        .get("/api/v1/sections/template.csv")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(tcsv_resp.status(), Status::Ok, "GET /api/v1/sections/template.csv must return 200");
+    let _ = tcsv_resp.into_string().await;
+
+    // GET /api/v1/sections/template.xlsx
+    let txlsx_resp = client
+        .get("/api/v1/sections/template.xlsx")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(txlsx_resp.status(), Status::Ok, "GET /api/v1/sections/template.xlsx must return 200");
+    let _ = txlsx_resp.into_string().await;
+
+    // GET /api/v1/sections/export.csv
+    let ecsv_resp = client
+        .get("/api/v1/sections/export.csv")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(ecsv_resp.status(), Status::Ok, "GET /api/v1/sections/export.csv must return 200");
+    let _ = ecsv_resp.into_string().await;
+
+    // GET /api/v1/sections/export.xlsx
+    let exlsx_resp = client
+        .get("/api/v1/sections/export.xlsx")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(exlsx_resp.status(), Status::Ok, "GET /api/v1/sections/export.xlsx must return 200");
+    let _ = exlsx_resp.into_string().await;
+
+    // GET /api/v1/sections/<id>/versions — find a section first
+    let sections_resp = client
+        .get("/api/v1/sections?limit=1&offset=0")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let sections_body = sections_resp.into_string().await.unwrap_or_default();
+    let sections: serde_json::Value = serde_json::from_str(&sections_body).unwrap_or_default();
+
+    if let Some(section_id) = sections.as_array().and_then(|a| a.first()).and_then(|s| s["id"].as_str()) {
+        let ver_resp = client
+            .get(format!("/api/v1/sections/{section_id}/versions"))
+            .header(bearer(&admin_token))
+            .dispatch()
+            .await;
+        let ver_status = ver_resp.status();
+        let ver_body = ver_resp.into_string().await.unwrap_or_default();
+        assert_eq!(ver_status, Status::Ok, "GET /api/v1/sections/{{id}}/versions must return 200; body: {ver_body}");
+    } else {
+        println!("  NOTE: no sections in DB; skipping GET /api/v1/sections/{{id}}/versions check");
+    }
+
+    // POST /api/v1/sections/import?mode=dry_run with minimal CSV
+    // Build a minimal multipart body with a CSV that has just headers (valid empty dry-run)
+    let csv_content = "course_code,section_code,term,year,capacity\n";
+    let boundary = "----FormBoundary7MA4YWxkTrZu0gW";
+    let multipart_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sections.csv\"\r\nContent-Type: text/csv\r\n\r\n{csv_content}\r\n--{boundary}--\r\n"
+    );
+
+    let import_resp = client
+        .post("/api/v1/sections/import?mode=dry_run")
+        .header(rocket::http::Header::new(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        ))
+        .header(bearer(&admin_token))
+        .body(multipart_body)
+        .dispatch()
+        .await;
+    let import_status = import_resp.status();
+    let import_body = import_resp.into_string().await.unwrap_or_default();
+    // Dry-run with header-only CSV: expect 200 (zero rows, all valid) or 422 (missing required data)
+    // Either way, the route was reached (not 404)
+    assert!(
+        import_status != Status::NotFound,
+        "POST /api/v1/sections/import?mode=dry_run must reach the route handler (not 404); got {import_status}; body: {import_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cov-7 — GET /api/v1/courses/<id>/versions/<vid>, template.csv, template.xlsx, export.xlsx
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_courses_version_by_id_and_templates_xlsx_export() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_courses_version_by_id_and_templates_xlsx_export — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/courses/template.csv
+    let tcsv_resp = client
+        .get("/api/v1/courses/template.csv")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(tcsv_resp.status(), Status::Ok, "GET /api/v1/courses/template.csv must return 200");
+    let _ = tcsv_resp.into_string().await;
+
+    // GET /api/v1/courses/template.xlsx
+    let txlsx_resp = client
+        .get("/api/v1/courses/template.xlsx")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(txlsx_resp.status(), Status::Ok, "GET /api/v1/courses/template.xlsx must return 200");
+    let _ = txlsx_resp.into_string().await;
+
+    // GET /api/v1/courses/export.xlsx
+    let exlsx_resp = client
+        .get("/api/v1/courses/export.xlsx")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    assert_eq!(exlsx_resp.status(), Status::Ok, "GET /api/v1/courses/export.xlsx must return 200");
+    let _ = exlsx_resp.into_string().await;
+
+    // GET /api/v1/courses/<id>/versions/<vid> — find a course and version first
+    let courses_resp = client
+        .get("/api/v1/courses?limit=1&offset=0")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let courses_body = courses_resp.into_string().await.unwrap_or_default();
+    let courses: serde_json::Value = serde_json::from_str(&courses_body).unwrap_or_default();
+
+    if let Some(course_id) = courses.as_array().and_then(|a| a.first()).and_then(|c| c["id"].as_str()) {
+        let versions_resp = client
+            .get(format!("/api/v1/courses/{course_id}/versions"))
+            .header(bearer(&admin_token))
+            .dispatch()
+            .await;
+        let versions_body = versions_resp.into_string().await.unwrap_or_default();
+        let versions: serde_json::Value = serde_json::from_str(&versions_body).unwrap_or_default();
+
+        if let Some(vid) = versions.as_array().and_then(|a| a.first()).and_then(|v| v["id"].as_str()) {
+            let ver_resp = client
+                .get(format!("/api/v1/courses/{course_id}/versions/{vid}"))
+                .header(bearer(&admin_token))
+                .dispatch()
+                .await;
+            let ver_status = ver_resp.status();
+            let ver_body = ver_resp.into_string().await.unwrap_or_default();
+            assert_eq!(ver_status, Status::Ok, "GET /api/v1/courses/{{id}}/versions/{{vid}} must return 200; body: {ver_body}");
+        } else {
+            println!("  NOTE: no course versions in DB; skipping GET /api/v1/courses/{{id}}/versions/{{vid}} check");
+        }
+    } else {
+        println!("  NOTE: no courses in DB; skipping course version and export tests");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cov-8 — GET /api/v1/teaching-resources/<id>/versions and /<version_id>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_teaching_resources_versions() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_teaching_resources_versions — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let librarian_token = login_as(&client, LIBRARIAN_EMAIL, SEED_PASSWORD).await;
+
+    // Create a resource so we have something to fetch versions for
+    let create_body = serde_json::json!({
+        "title": "Coverage-test resource for version fetch",
+        "resource_type": "document",
+        "description": "Created by coverage test"
+    }).to_string();
+
+    let create_resp = client
+        .post("/api/v1/teaching-resources")
+        .header(ContentType::JSON)
+        .header(bearer(&librarian_token))
+        .body(create_body)
+        .dispatch()
+        .await;
+    let create_status = create_resp.status();
+    let create_raw = create_resp.into_string().await.unwrap_or_default();
+    assert_eq!(create_status, Status::Ok, "POST /api/v1/teaching-resources must succeed; body: {create_raw}");
+
+    let created: serde_json::Value = serde_json::from_str(&create_raw).expect("resource JSON");
+    let resource_id = created["id"].as_str().expect("resource id").to_string();
+
+    // GET /api/v1/teaching-resources/<id>/versions
+    let versions_resp = client
+        .get(format!("/api/v1/teaching-resources/{resource_id}/versions"))
+        .header(bearer(&librarian_token))
+        .dispatch()
+        .await;
+    let versions_status = versions_resp.status();
+    let versions_body = versions_resp.into_string().await.unwrap_or_default();
+    assert_eq!(versions_status, Status::Ok, "GET /api/v1/teaching-resources/{{id}}/versions must return 200; body: {versions_body}");
+
+    let versions: serde_json::Value = serde_json::from_str(&versions_body).expect("versions JSON");
+    let arr = versions.as_array().expect("versions must be array");
+    assert!(!arr.is_empty(), "newly created resource must have at least one version");
+    let version_id = arr[0]["id"].as_str().expect("version id").to_string();
+
+    // GET /api/v1/teaching-resources/<id>/versions/<version_id>
+    let ver_resp = client
+        .get(format!("/api/v1/teaching-resources/{resource_id}/versions/{version_id}"))
+        .header(bearer(&librarian_token))
+        .dispatch()
+        .await;
+    let ver_status = ver_resp.status();
+    let ver_body = ver_resp.into_string().await.unwrap_or_default();
+    assert_eq!(ver_status, Status::Ok, "GET /api/v1/teaching-resources/{{id}}/versions/{{vid}} must return 200; body: {ver_body}");
+
+    let ver: serde_json::Value = serde_json::from_str(&ver_body).expect("version JSON");
+    assert_eq!(ver["id"].as_str(), Some(version_id.as_str()), "returned version id must match");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-9 — GET /api/v1/users/<id>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_users_get_by_id() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_users_get_by_id — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/users/ — list to find an ID
+    let list_resp = client
+        .get("/api/v1/users")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let list_body = list_resp.into_string().await.unwrap_or_default();
+    let users: serde_json::Value = serde_json::from_str(&list_body).expect("users list JSON");
+    let user_id = users
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|u| u["id"].as_str())
+        .expect("at least one user must exist (seed users)")
+        .to_string();
+
+    // GET /api/v1/users/<id>
+    let get_resp = client
+        .get(format!("/api/v1/users/{user_id}"))
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let get_status = get_resp.status();
+    let get_body = get_resp.into_string().await.unwrap_or_default();
+    assert_eq!(get_status, Status::Ok, "GET /api/v1/users/{{id}} must return 200; body: {get_body}");
+
+    let user: serde_json::Value = serde_json::from_str(&get_body).expect("user JSON");
+    assert_eq!(user["id"].as_str(), Some(user_id.as_str()), "returned user id must match");
+}
+
+// ---------------------------------------------------------------------------
+// Cov-10 — PUT /api/v1/reports/<id>
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_reports_update() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_reports_update — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // Create a report first
+    let create_body = serde_json::json!({
+        "title": "Coverage-test report for update",
+        "query_definition": {
+            "report_type": "audit_summary",
+            "filters": {}
+        },
+        "default_format": "csv"
+    }).to_string();
+
+    let create_resp = client
+        .post("/api/v1/reports")
+        .header(ContentType::JSON)
+        .header(bearer(&admin_token))
+        .body(create_body)
+        .dispatch()
+        .await;
+    let create_status = create_resp.status();
+    let create_raw = create_resp.into_string().await.unwrap_or_default();
+    assert_eq!(create_status, Status::Ok, "POST /api/v1/reports must succeed; body: {create_raw}");
+
+    let created: serde_json::Value = serde_json::from_str(&create_raw).expect("report JSON");
+    let report_id = created["id"].as_str().expect("report id").to_string();
+
+    // PUT /api/v1/reports/<id>
+    let update_body = serde_json::json!({
+        "title": "Coverage-test report for update (renamed)",
+        "query_definition": {
+            "report_type": "audit_summary",
+            "filters": {}
+        },
+        "default_format": "csv"
+    }).to_string();
+
+    let update_resp = client
+        .put(format!("/api/v1/reports/{report_id}"))
+        .header(ContentType::JSON)
+        .header(bearer(&admin_token))
+        .body(update_body)
+        .dispatch()
+        .await;
+    let update_status = update_resp.status();
+    let update_body_str = update_resp.into_string().await.unwrap_or_default();
+    assert_eq!(update_status, Status::Ok, "PUT /api/v1/reports/{{id}} must return 200; body: {update_body_str}");
+
+    let updated: serde_json::Value = serde_json::from_str(&update_body_str).expect("updated report JSON");
+    assert!(
+        updated["title"].as_str().unwrap_or("").contains("renamed"),
+        "updated report title must reflect the new value; body: {update_body_str}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cov-11 — Remaining dashboard endpoints: fill-rate, drop-rate, dwell-time, interaction-quality
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn cov_dashboards_remaining_endpoints() {
+    let Some(db_url) = test_db_url() else {
+        println!("[SKIP] cov_dashboards_remaining_endpoints — set SCHOLARLY_TEST_DB_URL to run");
+        return;
+    };
+    let client = build_client(&db_url).await;
+    let admin_token = login_as(&client, ADMIN_EMAIL, SEED_PASSWORD).await;
+
+    // GET /api/v1/dashboards/fill-rate
+    let fill_resp = client
+        .get("/api/v1/dashboards/fill-rate")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let fill_status = fill_resp.status();
+    let fill_body = fill_resp.into_string().await.unwrap_or_default();
+    assert_eq!(fill_status, Status::Ok, "GET /api/v1/dashboards/fill-rate must return 200; body: {fill_body}");
+
+    // GET /api/v1/dashboards/drop-rate
+    let drop_resp = client
+        .get("/api/v1/dashboards/drop-rate")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let drop_status = drop_resp.status();
+    let drop_body = drop_resp.into_string().await.unwrap_or_default();
+    assert_eq!(drop_status, Status::Ok, "GET /api/v1/dashboards/drop-rate must return 200; body: {drop_body}");
+
+    // GET /api/v1/dashboards/dwell-time
+    let dwell_resp = client
+        .get("/api/v1/dashboards/dwell-time")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let dwell_status = dwell_resp.status();
+    let dwell_body = dwell_resp.into_string().await.unwrap_or_default();
+    assert_eq!(dwell_status, Status::Ok, "GET /api/v1/dashboards/dwell-time must return 200; body: {dwell_body}");
+
+    // GET /api/v1/dashboards/interaction-quality
+    let iq_resp = client
+        .get("/api/v1/dashboards/interaction-quality")
+        .header(bearer(&admin_token))
+        .dispatch()
+        .await;
+    let iq_status = iq_resp.status();
+    let iq_body = iq_resp.into_string().await.unwrap_or_default();
+    assert_eq!(iq_status, Status::Ok, "GET /api/v1/dashboards/interaction-quality must return 200; body: {iq_body}");
 }

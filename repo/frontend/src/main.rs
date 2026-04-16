@@ -11,6 +11,10 @@ mod router;
 mod state;
 mod types;
 
+// Frontend unit tests — see src/tests/ for identifiable per-module test files.
+#[cfg(test)]
+mod tests;
+
 use dioxus::prelude::*;
 use dioxus_router::prelude::Router;
 

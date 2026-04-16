@@ -1,5 +1,7 @@
 # Scholarly
 
+**Project Type: fullstack** (Dioxus/WASM frontend + Rocket/Rust backend + MySQL)
+
 Offline-first scholarly resources and teaching operations management system.
 
 ## Current State: Phase 7 complete + Hardening Pass applied
@@ -537,8 +539,10 @@ Backend follows clean architecture: `api → application → domain ← infrastr
 ## Quick Start
 
 ```bash
-docker compose up
+docker-compose up
 ```
+
+(Also works as `docker compose up` — both forms are supported.)
 
 That's it. The system:
 1. Starts MySQL and waits for it to be healthy
@@ -547,6 +551,14 @@ That's it. The system:
 4. Starts the Rocket API server on port 8000
 5. Builds and serves the Dioxus frontend on port 3000
 
+### Access URLs
+
+| Service  | URL                      | Description               |
+|----------|--------------------------|---------------------------|
+| Frontend | http://localhost:3000    | Dioxus SPA (via nginx)    |
+| Backend  | http://localhost:8000    | Rocket REST API           |
+| MySQL    | localhost:3306           | Database (direct access)  |
+
 ### Exposed Ports
 
 | Service  | Port | Description               |
@@ -554,6 +566,43 @@ That's it. The system:
 | Frontend | 3000 | Dioxus SPA (via nginx)    |
 | Backend  | 8000 | Rocket REST API           |
 | MySQL    | 3306 | Database (direct access)  |
+
+### Verification
+
+After `docker-compose up` completes, verify the system is healthy:
+
+#### API verification (curl)
+
+```bash
+# 1. Health check — should return {"status":"ok","database":"ok"}
+curl -s http://localhost:8000/api/v1/health | jq .
+
+# 2. Login — should return a bearer token
+curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@scholarly.local","password":"ChangeMe!Scholarly2026"}' | jq .token
+
+# 3. Authenticated request — should return current user info
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@scholarly.local","password":"ChangeMe!Scholarly2026"}' | jq -r .token)
+curl -s http://localhost:8000/api/v1/auth/me \
+  -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+Expected outcomes:
+- Health check returns `{"status":"ok","database":"ok"}` (HTTP 200)
+- Login returns a non-null `token` string (HTTP 200)
+- `/auth/me` returns a user object with `email: "admin@scholarly.local"` (HTTP 200)
+
+#### UI verification (browser)
+
+1. Open **http://localhost:3000** in your browser.
+2. The login page should load with email/password fields.
+3. Enter `admin@scholarly.local` / `ChangeMe!Scholarly2026` and click **Sign In**.
+4. Expected: redirected to the Dashboard showing navigation for all admin-accessible sections (Library, Courses, Reports, Metrics, Admin, etc.).
+5. Navigate to **Library → Journals** — the journal listing page should load without errors.
+6. Navigate to **Admin → Settings** — the admin configuration page should load and display system settings.
 
 ### Default Seed Users
 
@@ -733,29 +782,44 @@ relies on filesystem permissions on the Docker volume only.
 
 ## Running Tests
 
-### Default (local dev — no live DB required)
+### Default (full suite — stack started automatically)
 
 ```bash
 ./run_tests.sh
 ```
 
-Runs backend unit tests, cargo integration tests, frontend tests, and the
-shell-based API suite (skipped automatically if the backend is not
-reachable). The 5 DB-backed authz integration tests in
-`backend/tests/api_routes_test.rs` are **skipped with a visible notice**
-when `SCHOLARLY_TEST_DB_URL` is not set — the run still exits 0.
+The script starts the Docker Compose stack (`docker compose up -d`), waits
+for the backend health check to pass, then runs all suites in sequence:
 
-### With DB integration tests (local, stack running)
+1. **Backend unit tests** — `cargo test --lib`
+2. **Backend integration tests** — `cargo test --test '*'`
+3. **DB authz integration tests** — `api_routes_test.rs` against the
+   compose MySQL (auto-enabled when the stack is started by the script)
+4. **Frontend unit tests** — `cargo test` in `frontend/`
+5. **API shell tests** — every `API_tests/*.sh` against the live backend
+
+The stack is torn down automatically when the run finishes. Pass
+`--no-docker-down` to leave it running.
+
+### Flags
 
 ```bash
-# Start the compose stack first (needed once per session)
-docker compose up -d
-
-SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3306/scholarly \
-  ./run_tests.sh
+./run_tests.sh --unit-only        # cargo tests only; no stack startup or API tests
+./run_tests.sh --api-only         # start stack + run API shell tests only
+./run_tests.sh --no-docker-up     # skip 'docker compose up' (stack already running)
+./run_tests.sh --no-docker-down   # leave stack running after tests finish
+./run_tests.sh --strict-integration  # fail if SCHOLARLY_TEST_DB_URL is absent
 ```
 
-The 5 tests cover critical authorization and scope-enforcement paths that
+### With DB integration tests (stack already running)
+
+```bash
+# Stack is already up from a previous run
+SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly \
+  ./run_tests.sh --no-docker-up
+```
+
+The DB authz tests cover critical authorization and scope-enforcement paths that
 unit tests cannot exercise end-to-end:
 
 | # | Test | Assertion |

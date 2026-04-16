@@ -1,38 +1,45 @@
 #!/usr/bin/env bash
 # Scholarly — full test suite runner
 #
+# The script starts the Docker Compose stack automatically, waits for the
+# backend to be healthy, then runs all test suites in order:
+#
+#   1. Backend unit tests       (cargo test --lib)
+#   2. Backend integration tests (cargo test --test '*')
+#   3. DB authz integration tests (api_routes_test.rs — requires live DB)
+#   4. Frontend unit tests      (cargo test)
+#   5. API shell tests          (API_tests/*.sh against live backend)
+#
 # Usage:
-#   ./run_tests.sh                          # run all suites; DB integration tests skipped with notice
-#   BACKEND_URL=http://localhost:8000 ./run_tests.sh
-#   ./run_tests.sh --api-only               # only run API_tests/ scripts (requires live backend)
-#   ./run_tests.sh --unit-only              # only run cargo unit/integration tests
+#   ./run_tests.sh                          # start stack + run all suites
+#   ./run_tests.sh --api-only               # start stack + run API shell tests only
+#   ./run_tests.sh --unit-only              # run cargo unit tests only (no stack needed)
+#   ./run_tests.sh --no-docker-up           # skip 'docker compose up' (stack already running)
+#   ./run_tests.sh --no-docker-down         # leave stack running after tests finish
+#   ./run_tests.sh --strict-integration     # fail if SCHOLARLY_TEST_DB_URL is absent
 #
-# DB integration tests (backend/tests/api_routes_test.rs):
-#   SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly \
-#     ./run_tests.sh
-#       — Runs the 5 DB-backed authz/scope tests against a live MySQL instance.
-#         The compose stack must be up. Tests run with --test-threads=1.
-#
-#   SCHOLARLY_TEST_DB_URL=mysql://... ./run_tests.sh --strict-integration
-#       — Same as above but FAILS the run if SCHOLARLY_TEST_DB_URL is absent.
-#         Use this in CI to prevent silent skips of critical integration tests.
+# DB integration tests are automatically enabled when the compose stack is up
+# (SCHOLARLY_TEST_DB_URL is set automatically to the compose MySQL).
+# Override with: SCHOLARLY_TEST_DB_URL=mysql://... ./run_tests.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
+
 API_ONLY=0
 UNIT_ONLY=0
-# When set, fails the run if SCHOLARLY_TEST_DB_URL is absent so that DB
-# integration tests cannot be silently skipped.  Intended for CI pipelines.
-# Local dev: omit the flag (or leave SCHOLARLY_TEST_DB_URL unset) to skip
-# the DB integration tests gracefully.
 STRICT_INTEGRATION=0
+NO_DOCKER_UP=0
+NO_DOCKER_DOWN=0
+
 for arg in "$@"; do
   case "$arg" in
     --api-only)           API_ONLY=1 ;;
     --unit-only)          UNIT_ONLY=1 ;;
     --strict-integration) STRICT_INTEGRATION=1 ;;
+    --no-docker-up)       NO_DOCKER_UP=1 ;;
+    --no-docker-down)     NO_DOCKER_DOWN=1 ;;
   esac
 done
 
@@ -45,13 +52,124 @@ fail()  { echo "  [FAIL] $*"; FAIL=$((FAIL + 1)); }
 skip()  { echo "  [SKIP] $*"; SKIP=$((SKIP + 1)); }
 banner(){ echo ""; echo "━━━  $*  ━━━"; }
 
-have_cargo() { command -v cargo >/dev/null 2>&1; }
+have_cargo()  { command -v cargo  >/dev/null 2>&1; }
+have_docker() { command -v docker >/dev/null 2>&1; }
+
+# ─── Compose stack management ─────────────────────────────────────────────────
+
+COMPOSE_CMD=""
+if have_docker; then
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD="docker-compose"
+  fi
+fi
+
+# Bring the compose stack up in detached mode, then wait for the backend
+# health endpoint to return 200.
+#
+# Why the long timeout: on first run the backend container must compile
+# migrations, run all SQL files, and Argon2id-hash every seed user password
+# before Rocket starts accepting connections.  On a mid-range laptop this
+# takes 3–5 minutes after the MySQL service becomes healthy.
+bring_stack_up() {
+  if [ -z "$COMPOSE_CMD" ]; then
+    echo "  [WARN] docker / docker compose not found — skipping stack startup."
+    echo "         Install Docker or start the stack manually before running tests."
+    return 1
+  fi
+
+  banner "Starting Docker Compose stack"
+  echo "  Running: $COMPOSE_CMD up -d"
+  echo "  (Building images on first run takes several minutes — please wait)"
+  echo ""
+
+  cd "$SCRIPT_DIR"
+
+  # Always build images from the current Dockerfiles before starting.
+  # Docker layer caching makes this fast after the first build.
+  # This prevents stale cached images (from other projects or old builds)
+  # from being used in place of the correct backend or frontend image.
+  echo "  Building images from current Dockerfiles..."
+  $COMPOSE_CMD build
+  echo ""
+
+  $COMPOSE_CMD up -d
+
+  echo ""
+  echo "  Waiting for backend to finish migrations and start serving..."
+  echo "  Health endpoint: ${BACKEND_URL}/api/v1/health"
+  echo "  (First-run migrations + Argon2id seeding can take 3–5 minutes)"
+  echo ""
+
+  # Give the entrypoint a head-start before we start hammering the health endpoint.
+  sleep 10
+
+  local waited=10
+  local max_wait=360   # 6 minutes — covers slow first-run migration + seeding
+  local poll=5         # poll every 5 seconds
+
+  while [ "$waited" -lt "$max_wait" ]; do
+    local code
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+           --max-time 4 "${BACKEND_URL}/api/v1/health" 2>/dev/null || echo "000")
+    if [ "$code" = "200" ]; then
+      echo "  Backend is healthy (HTTP 200) — took ${waited}s total."
+      return 0
+    fi
+    # Show a live progress line so the user sees the script is still running.
+    printf "  [%3ds / %ds] HTTP %s — still waiting for backend...\r" \
+           "$waited" "$max_wait" "$code"
+    sleep "$poll"
+    waited=$((waited + poll))
+  done
+
+  echo ""
+  echo "  [FAIL] Backend did not become healthy within ${max_wait}s."
+  echo ""
+  echo "  Last few lines from the backend container:"
+  $COMPOSE_CMD logs --tail=20 backend 2>/dev/null || true
+  echo ""
+  echo "  Tip: run '$COMPOSE_CMD logs -f backend' to watch the startup in real time."
+  return 1
+}
+
+bring_stack_down() {
+  if [ -z "$COMPOSE_CMD" ]; then return; fi
+  banner "Stopping Docker Compose stack"
+  cd "$SCRIPT_DIR"
+  $COMPOSE_CMD down
+}
+
+# ─── Stack startup ────────────────────────────────────────────────────────────
+# --unit-only skips the stack entirely (no API or DB tests needed).
+# --no-docker-up skips bring-up (caller guarantees stack is already running).
+
+STACK_STARTED=0
+if [ "$UNIT_ONLY" -eq 0 ] && [ "$NO_DOCKER_UP" -eq 0 ]; then
+  if bring_stack_up; then
+    STACK_STARTED=1
+  else
+    echo ""
+    echo "  Stack startup failed. Unit tests will still run; API and DB tests will be skipped."
+    echo ""
+  fi
+fi
+
+# When the compose stack is up, automatically enable DB integration tests
+# using the containerized MySQL (port 3307 on the host, as mapped in compose).
+if [ "$STACK_STARTED" -eq 1 ] && [ -z "${SCHOLARLY_TEST_DB_URL:-}" ]; then
+  export SCHOLARLY_TEST_DB_URL="mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly"
+  echo "  Auto-set SCHOLARLY_TEST_DB_URL to compose MySQL (port 3307)."
+  echo ""
+fi
 
 # ─── 1. Backend unit tests (cargo test --lib) ─────────────────────────────────
-if [ $API_ONLY -eq 0 ]; then
+if [ "$API_ONLY" -eq 0 ]; then
   banner "Backend unit tests  (cargo test --lib)"
   if ! have_cargo; then
-    skip "Backend unit tests (cargo not in PATH — install Rust or run inside the Docker container)"
+    skip "Backend unit tests (cargo not in PATH — install Rust to run locally)"
   else
     cd "$SCRIPT_DIR/backend"
     if cargo test --lib --quiet 2>&1; then
@@ -63,10 +181,10 @@ if [ $API_ONLY -eq 0 ]; then
 fi
 
 # ─── 2. Backend integration tests (cargo test --test '*') ─────────────────────
-if [ $API_ONLY -eq 0 ]; then
+if [ "$API_ONLY" -eq 0 ]; then
   banner "Backend integration tests  (cargo test --test '*')"
   if ! have_cargo; then
-    skip "Backend integration tests (cargo not in PATH — install Rust or run inside the Docker container)"
+    skip "Backend integration tests (cargo not in PATH)"
   else
     cd "$SCRIPT_DIR/backend"
     if cargo test --test '*' --quiet 2>&1; then
@@ -76,26 +194,14 @@ if [ $API_ONLY -eq 0 ]; then
     fi
   fi
 
-  # ── DB-backed authz integration tests (opt-in, require live MySQL) ────────
-  # tests/api_routes_test.rs contains 5 tests that cover critical authz/scope
-  # paths.  When SCHOLARLY_TEST_DB_URL is absent they silently skip inside
-  # `cargo test` (reported as "passed" with zero assertions), which is correct
-  # for local dev but creates a false-green risk in CI.
-  #
-  # Three modes:
-  #   default              — skip with a visible notice (local dev workflow)
-  #   SCHOLARLY_TEST_DB_URL set  — tests run for real against the pointed DB
-  #   --strict-integration — fail the run if SCHOLARLY_TEST_DB_URL is absent
-  # ─────────────────────────────────────────────────────────────────────────
+  # ── DB-backed authz integration tests ────────────────────────────────────
   echo ""
   if [ -n "${SCHOLARLY_TEST_DB_URL:-}" ]; then
-    # Re-run only the DB integration test binary explicitly so its result is
-    # surfaced as a distinct line in this script's output even though it was
-    # already included in `cargo test --test '*'` above.
     banner "DB authz integration tests  (SCHOLARLY_TEST_DB_URL is set)"
+    cd "$SCRIPT_DIR/backend"
     if SCHOLARLY_TEST_DB_URL="${SCHOLARLY_TEST_DB_URL}" \
         cargo test --test api_routes_test -- --test-threads=1 --quiet 2>&1; then
-      pass "DB authz integration tests (5/5 ran against live DB)"
+      pass "DB authz integration tests (ran against live DB)"
     else
       fail "DB authz integration tests"
     fi
@@ -104,43 +210,31 @@ if [ $API_ONLY -eq 0 ]; then
     fail "DB authz integration tests — SCHOLARLY_TEST_DB_URL is not set"
     echo ""
     echo "  strict-integration mode requires a live MySQL connection."
-    echo "  Set SCHOLARLY_TEST_DB_URL and retry, for example:"
+    echo "  Start the stack and retry:"
     echo ""
-    echo "    SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass@localhost:3307/scholarly \\"
-    echo "      ./run_tests.sh --strict-integration"
+    echo "    ./run_tests.sh --strict-integration"
     echo ""
   else
-    # Default local-dev path: warn visibly but do not fail.
-    skip "DB authz integration tests (SCHOLARLY_TEST_DB_URL not set)"
+    skip "DB authz integration tests (SCHOLARLY_TEST_DB_URL not set; stack not started)"
     echo ""
     echo "  ┌──────────────────────────────────────────────────────────────────┐"
-    echo "  │  NOTICE  5 DB-backed authz/scope integration tests were SKIPPED  │"
+    echo "  │  NOTICE  DB-backed authz/scope integration tests were SKIPPED    │"
     echo "  │  (backend/tests/api_routes_test.rs).                             │"
     echo "  │                                                                  │"
-    echo "  │  These cover critical paths that unit tests cannot exercise:     │"
-    echo "  │    1. Unauthenticated request → 401                              │"
-    echo "  │    2. Non-admin on AdminOnly endpoint → 403                      │"
-    echo "  │    3. Report schedule scope isolation → 403                      │"
-    echo "  │    4. Audit export capability gate (viewer/librarian) → 403      │"
-    echo "  │    5. Audit export CSV happy-path (admin) → 200 + text/csv       │"
-    echo "  │                                                                  │"
-    echo "  │  To run them locally (requires docker compose up first):         │"
+    echo "  │  These run automatically when the compose stack is started by    │"
+    echo "  │  this script. To run them without the full suite:                │"
     echo "  │    SCHOLARLY_TEST_DB_URL=mysql://scholarly_app:scholarly_app_pass│"
-    echo "  │      @localhost:3307/scholarly ./run_tests.sh                    │"
-    echo "  │                                                                  │"
-    echo "  │  To enforce in CI (fails if env var is absent):                  │"
-    echo "  │    SCHOLARLY_TEST_DB_URL=mysql://... ./run_tests.sh \\           │"
-    echo "  │      --strict-integration                                        │"
+    echo "  │      @localhost:3307/scholarly ./run_tests.sh --no-docker-up     │"
     echo "  └──────────────────────────────────────────────────────────────────┘"
     echo ""
   fi
 fi
 
 # ─── 3. Frontend tests (cargo test) ───────────────────────────────────────────
-if [ $API_ONLY -eq 0 ]; then
+if [ "$API_ONLY" -eq 0 ]; then
   banner "Frontend tests  (cargo test)"
   if ! have_cargo; then
-    skip "Frontend tests (cargo not in PATH — install Rust or run inside the Docker container)"
+    skip "Frontend tests (cargo not in PATH)"
   else
     cd "$SCRIPT_DIR/frontend"
     if cargo test --quiet 2>&1; then
@@ -152,22 +246,15 @@ if [ $API_ONLY -eq 0 ]; then
 fi
 
 # ─── 4. API tests (shell scripts against live backend) ────────────────────────
-if [ $UNIT_ONLY -eq 0 ]; then
+if [ "$UNIT_ONLY" -eq 0 ]; then
   banner "API tests  (shell scripts vs ${BACKEND_URL})"
 
-  # curl writes "000" when there is no HTTP response (connection refused, timeout).
-  # The trailing "; true" prevents set -e from aborting on a non-zero curl exit.
-  health_response=$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_URL}/api/v1/health" 2>/dev/null; true)
+  health_response=$(curl -s -o /dev/null -w "%{http_code}" "${BACKEND_URL}/api/v1/health" 2>/dev/null || echo "000")
   if [ "$health_response" != "200" ]; then
-    skip "Backend not reachable or unhealthy at ${BACKEND_URL} (HTTP ${health_response})."
-    echo ""
-    echo "  Start the stack first:  docker compose up"
-    echo "  Then re-run:            ./run_tests.sh"
-    echo ""
+    skip "Backend not reachable at ${BACKEND_URL} (HTTP ${health_response}) — API tests skipped."
     if [ "$health_response" = "502" ] || [ "$health_response" = "503" ]; then
-      echo "  HTTP ${health_response} usually means nginx is up but the backend container"
-      echo "  has not finished starting or crashed. Check logs with:"
-      echo "    docker compose logs backend"
+      echo "  HTTP ${health_response}: nginx is up but backend may still be starting."
+      echo "  Check logs: $COMPOSE_CMD logs backend"
     fi
   else
     total_api=0
@@ -192,6 +279,11 @@ if [ $UNIT_ONLY -eq 0 ]; then
     echo ""
     echo "  API tests: $((total_api - failed_api))/${total_api} passed"
   fi
+fi
+
+# ─── Stack teardown ───────────────────────────────────────────────────────────
+if [ "$STACK_STARTED" -eq 1 ] && [ "$NO_DOCKER_DOWN" -eq 0 ]; then
+  bring_stack_down
 fi
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
