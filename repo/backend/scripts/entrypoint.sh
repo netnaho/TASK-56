@@ -89,6 +89,13 @@ done
 echo "Seeds complete."
 
 # ---------------------------------------------------------------------------
+# Ensure Rocket's temp directory exists (needed for TempFile multipart uploads)
+# ---------------------------------------------------------------------------
+if [ -n "${ROCKET_TEMP_DIR:-}" ]; then
+    mkdir -p "${ROCKET_TEMP_DIR}"
+fi
+
+# ---------------------------------------------------------------------------
 # Start the backend server
 # ---------------------------------------------------------------------------
 echo "Starting Scholarly backend..."

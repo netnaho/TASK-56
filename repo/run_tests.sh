@@ -198,12 +198,16 @@ if [ "$API_ONLY" -eq 0 ]; then
   echo ""
   if [ -n "${SCHOLARLY_TEST_DB_URL:-}" ]; then
     banner "DB authz integration tests  (SCHOLARLY_TEST_DB_URL is set)"
-    cd "$SCRIPT_DIR/backend"
-    if SCHOLARLY_TEST_DB_URL="${SCHOLARLY_TEST_DB_URL}" \
-        cargo test --test api_routes_test -- --test-threads=1 --quiet 2>&1; then
-      pass "DB authz integration tests (ran against live DB)"
+    if ! have_cargo; then
+      skip "DB authz integration tests (cargo not in PATH — install Rust to run locally)"
     else
-      fail "DB authz integration tests"
+      cd "$SCRIPT_DIR/backend"
+      if SCHOLARLY_TEST_DB_URL="${SCHOLARLY_TEST_DB_URL}" \
+          cargo test --test api_routes_test -- --test-threads=1 --quiet 2>&1; then
+        pass "DB authz integration tests (ran against live DB)"
+      else
+        fail "DB authz integration tests"
+      fi
     fi
   elif [ "$STRICT_INTEGRATION" -eq 1 ]; then
     banner "DB authz integration tests  (strict-integration mode)"
